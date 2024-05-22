@@ -1,7 +1,11 @@
+mod unicode;
+
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 
 use nix::sys::signal;
+
+use crate::unicode::IsWide;
 
 nix::ioctl_read_bad! {
     ioctl_gwinsz,
@@ -64,30 +68,66 @@ impl Context {
         let _ = std::io::stdout().flush();
     }
     fn curpos(&self) -> (u32, u32) {
+        let mut row = 0;
         let mut col = 0;
-        col += self.prompt.chars().count() as u32;
-        col += self.chars.len() as u32;
-        let row = col / self.col;
-        let col = col % self.col;
+        for c in self.prompt.chars() {
+            col += c.width();
+        }
+        for c in &self.chars {
+            if c.is_wide() {
+                if col >= self.col - 1 {
+                    col = 0;
+                    row += 1;
+                    col += c.width();
+                } else if col >= self.col - 2 {
+                    col = 0;
+                } else {
+                    col += c.width();
+                }
+            } else {
+                if col >= self.col - 1 {
+                    col = 0;
+                    row += 1;
+                } else {
+                    col += c.width();
+                }
+            }
+        }
         (row, col)
     }
     fn delc(&mut self) {
-        let (_, curcol) = self.curpos();
-        if let Some(_) = self.chars.pop() {
+        let (currow, curcol) = self.curpos();
+        if let Some(c) = self.chars.pop() {
+            let (newrow, _) = self.curpos();
             if curcol == 0 {
-                eprintln!("Line return");
-                print!("\u{1b}[A\u{1b}[{}C\u{1b}[K\n", self.col - 1);
-                print!("\r\u{1b}[K\u{1b}[A\u{1b}[{}C", self.col - 1);
+                eprintln!("line return");
+                print!("\u{1b}[A\u{1b}[{}C\u{1b}[K\n", self.col - c.width());
+                print!("\r\u{1b}[K\u{1b}[A\u{1b}[{}C", self.col - c.width());
             } else {
-                print!("\u{8}\u{1b}[K");
+                if c.is_wide() {
+                    print!("\u{8}\u{8}");
+                } else {
+                    print!("\u{8}");
+                }
+                print!("\u{1b}[K");
+            }
+            if c.is_wide() && newrow != currow {
+                eprintln!("wide and half short recover");
+                print!("\u{1b}[A\u{1b}[{}C\u{1b}[K", self.col - 1);
             }
             let _ = std::io::stdout().flush();
         }
     }
     fn putc(&mut self, c: char) {
         let (_, curcol) = self.curpos();
-        if curcol >= self.col - 1 {
-            eprintln!("Line overflow");
+        if !c.is_wide() && curcol >= self.col - 1 {
+            eprintln!("half and line overflow");
+            print!("{} \r", c);
+        } else if c.is_wide() && curcol >= self.col - 1 {
+            eprintln!("wide and line overflow half short");
+            print!(" \u{1b}[K{}", c);
+        } else if c.is_wide() && curcol >= self.col - 2 {
+            eprintln!("wide and line overflow just");
             print!("{} \r", c);
         } else {
             print!("{}", c);
@@ -163,16 +203,27 @@ fn main() {
     if let Some(ref mut ctx) = *CTX.lock().unwrap() {
         ctx.prompt();
     }
-    let mut buf = [0u8; 1];
+    let mut buf = [0u8; 6];
+    let mut pos = 0;
     loop {
-        match std::io::stdin().read(&mut buf) {
-            Ok(_) => {
-                let c = char::from(buf[0]);
-                eprintln!("read: {:?}", c);
-                if let Some(ref mut ctx) = *CTX.lock().unwrap() {
-                    if let Err(_) = ctx.push(c) {
-                        break;
+        match std::io::stdin().read(&mut buf[pos..(pos + 1)]) {
+            Ok(n) => {
+                pos += n;
+                match std::str::from_utf8(&buf[0..pos]) {
+                    Ok(s) => {
+                        let c = s.chars().next().unwrap();
+                        eprintln!("read: {:?}", c);
+                        pos = 0;
+                        if let Some(ref mut ctx) = *CTX.lock().unwrap() {
+                            if let Err(_) = ctx.push(c) {
+                                break;
+                            }
+                        }
                     }
+                    Err(_) => continue,
+                }
+                if pos == 6 {
+                    break;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
