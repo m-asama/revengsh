@@ -54,6 +54,14 @@ fn main() {
                         println!("");
                         break;
                     }
+                    '\u{8}' | '\u{7f}' => {
+                        // BS | DEL
+                        eprintln!("BS | DEL");
+                        if let Some(_) = chars.pop() {
+                            print!("\u{8} \u{8}");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
                     '\n' => {
                         // LF
                         eprintln!("LF");
