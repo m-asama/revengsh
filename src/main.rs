@@ -48,19 +48,31 @@ fn gwinsz() -> Result<(u32, u32), ()> {
     }
 }
 
+enum State {
+    InNormal,
+    Escaped,
+    CsiSeq,
+    OscSeq,
+    OscSeqEsc,
+}
+
 struct Context {
+    row: u32,
     col: u32,
     chars: Vec<char>,
     prompt: String,
+    state: State,
 }
 
 impl Context {
     fn new() -> Self {
-        let (_, col) = gwinsz().unwrap();
+        let (row, col) = gwinsz().unwrap();
         Self {
+            row: row,
             col: col,
             chars: Vec::<char>::new(),
             prompt: String::from("> "),
+            state: State::InNormal,
         }
     }
     fn prompt(&self) {
@@ -136,42 +148,97 @@ impl Context {
         let _ = std::io::stdout().flush();
     }
     fn push(&mut self, c: char) -> Result<(), ()> {
-        match c {
-            '?' => {
-                // HELP
-                eprintln!("HELP");
-                println!("");
-                println!("HELP");
-                self.prompt();
-                print!("{}", String::from_iter(&self.chars));
-                let _ = std::io::stdout().flush();
-                Ok(())
-            }
-            '\u{4}' => {
-                // EOT(Ctrl-D)
-                eprintln!("EOT(Ctrl-D)");
-                println!("");
-                Err(())
-            }
-            '\u{8}' | '\u{7f}' => {
-                // BS | DEL
-                eprintln!("BS | DEL");
-                self.delc();
-                Ok(())
-            }
-            '\n' => {
-                // LF
-                eprintln!("LF");
-                println!("");
-                println!("INPUT: {}", String::from_iter(&self.chars));
-                self.chars.clear();
-                self.prompt();
-                Ok(())
-            }
-            _ => {
-                self.putc(c);
-                Ok(())
-            }
+        match self.state {
+            State::InNormal => match c {
+                '?' => {
+                    eprintln!("HELP");
+                    println!("");
+                    println!("HELP");
+                    self.prompt();
+                    print!("{}", String::from_iter(&self.chars));
+                    let _ = std::io::stdout().flush();
+                    Ok(())
+                }
+                '\u{4}' => {
+                    // EOT(Ctrl-D)
+                    eprintln!("EOT(Ctrl-D)");
+                    println!("");
+                    Err(())
+                }
+                '\u{8}' | '\u{7f}' => {
+                    // BS | DEL
+                    eprintln!("BS | DEL");
+                    self.delc();
+                    Ok(())
+                }
+                '\u{1b}' => {
+                    // ESC
+                    eprintln!("ESC");
+                    self.state = State::Escaped;
+                    Ok(())
+                }
+                '\n' => {
+                    // LF
+                    eprintln!("LF");
+                    println!("");
+                    println!("INPUT: {}", String::from_iter(&self.chars));
+                    self.chars.clear();
+                    self.prompt();
+                    Ok(())
+                }
+                _ if c.is_control() => {
+                    eprintln!("{} is control", c);
+                    Ok(())
+                }
+                _ => {
+                    self.putc(c);
+                    Ok(())
+                }
+            },
+            State::Escaped => match c {
+                '[' => {
+                    self.state = State::CsiSeq;
+                    Ok(())
+                }
+                ']' => {
+                    self.state = State::OscSeq;
+                    Ok(())
+                }
+                _ => {
+                    self.state = State::InNormal;
+                    Ok(())
+                }
+            },
+            State::CsiSeq => match c {
+                _ if '\u{40}' <= c && c <= '\u{7e}' => {
+                    self.state = State::InNormal;
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+            State::OscSeq => match c {
+                '\u{7}' => {
+                    // BEL
+                    self.state = State::InNormal;
+                    Ok(())
+                }
+                '\u{1b}' => {
+                    // ESC
+                    self.state = State::OscSeqEsc;
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+            State::OscSeqEsc => match c {
+                '\\' => {
+                    self.state = State::InNormal;
+                    Ok(())
+                }
+                _ => {
+                    self.state = State::OscSeq;
+                    Ok(())
+                }
+            },
         }
     }
 }
@@ -180,7 +247,8 @@ static CTX: std::sync::Mutex<Option<Context>> = std::sync::Mutex::new(None);
 
 extern "C" fn winch_handler(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
     if let Some(ref mut ctx) = *CTX.lock().unwrap() {
-        if let Ok((_, col)) = gwinsz() {
+        if let Ok((row, col)) = gwinsz() {
+            ctx.row = row;
             ctx.col = col;
         }
     }
