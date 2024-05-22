@@ -3,12 +3,7 @@ name = "revengsh"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "phase01"
-path = "src/phase01/bin/main.rs"
-
 [dependencies]
 libc = "0.2.147"
-nix = { version = "0.26.2", features = [ "ioctl", "mman", "socket" ] }
+nix = { version = "0.26.2", features = [ "ioctl" ] }
 termios = "0.3.3"
-
