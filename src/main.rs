@@ -1,6 +1,12 @@
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 
+nix::ioctl_read_bad! {
+    ioctl_gwinsz,
+    libc::TIOCGWINSZ,
+    libc::winsize
+}
+
 fn term_setup() -> Result<termios::Termios, ()> {
     let fd = std::io::stdin().as_raw_fd();
     let mut termios = match termios::Termios::from_fd(fd) {
@@ -20,9 +26,112 @@ fn term_restore(termios_orig: termios::Termios) {
     let _ = termios::tcsetattr(fd, termios::TCSAFLUSH, &termios_orig);
 }
 
-fn prompt() {
-    print!("> ");
-    let _ = std::io::stdout().flush();
+fn gwinsz() -> Result<(u32, u32), ()> {
+    unsafe {
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if let Ok(_) = ioctl_gwinsz(std::io::stdout().as_raw_fd(), &mut ws) {
+            Ok((ws.ws_row as u32, ws.ws_col as u32))
+        } else {
+            Err(())
+        }
+    }
+}
+
+struct Context {
+    col: u32,
+    chars: Vec<char>,
+    prompt: String,
+}
+
+impl Context {
+    fn new() -> Self {
+        let (_, col) = gwinsz().unwrap();
+        Self {
+            col: col,
+            chars: Vec::<char>::new(),
+            prompt: String::from("> "),
+        }
+    }
+    fn prompt(&self) {
+        print!("{}", self.prompt);
+        let _ = std::io::stdout().flush();
+    }
+    fn curpos(&self) -> (u32, u32) {
+        let mut col = 0;
+        col += self.prompt.chars().count() as u32;
+        col += self.chars.len() as u32;
+        let row = col / self.col;
+        let col = col % self.col;
+        (row, col)
+    }
+    fn delc(&mut self) {
+        let (_, curcol) = self.curpos();
+        if let Some(_) = self.chars.pop() {
+            if curcol == 0 {
+                eprintln!("Line return");
+                print!("\u{1b}[A\u{1b}[{}C\u{1b}[K\n", self.col - 1);
+                print!("\r\u{1b}[K\u{1b}[A\u{1b}[{}C", self.col - 1);
+            } else {
+                print!("\u{8}\u{1b}[K");
+            }
+            let _ = std::io::stdout().flush();
+        }
+    }
+    fn putc(&mut self, c: char) {
+        let (_, curcol) = self.curpos();
+        if curcol >= self.col - 1 {
+            eprintln!("Line overflow");
+            print!("{} \r", c);
+        } else {
+            print!("{}", c);
+        }
+        self.chars.push(c);
+        let _ = std::io::stdout().flush();
+    }
+    fn push(&mut self, c: char) -> Result<(), ()> {
+        match c {
+            '?' => {
+                // HELP
+                eprintln!("HELP");
+                println!("");
+                println!("HELP");
+                self.prompt();
+                print!("{}", String::from_iter(&self.chars));
+                let _ = std::io::stdout().flush();
+                Ok(())
+            }
+            '\u{4}' => {
+                // EOT(Ctrl-D)
+                eprintln!("EOT(Ctrl-D)");
+                println!("");
+                Err(())
+            }
+            '\u{8}' | '\u{7f}' => {
+                // BS | DEL
+                eprintln!("BS | DEL");
+                self.delc();
+                Ok(())
+            }
+            '\n' => {
+                // LF
+                eprintln!("LF");
+                println!("");
+                println!("INPUT: {}", String::from_iter(&self.chars));
+                self.chars.clear();
+                self.prompt();
+                Ok(())
+            }
+            _ => {
+                self.putc(c);
+                Ok(())
+            }
+        }
+    }
 }
 
 fn main() {
@@ -30,51 +139,16 @@ fn main() {
         Ok(termios_orig) => termios_orig,
         Err(_) => return,
     };
-    let mut chars = Vec::<char>::new();
-    prompt();
+    let mut ctx = Context::new();
+    ctx.prompt();
     let mut buf = [0u8; 1];
     loop {
         match std::io::stdin().read(&mut buf) {
             Ok(_) => {
                 let c = char::from(buf[0]);
                 eprintln!("read: {:?}", c);
-                match c {
-                    '?' => {
-                        // HELP
-                        eprintln!("HELP");
-                        println!("");
-                        println!("HELP");
-                        prompt();
-                        print!("{}", String::from_iter(&chars));
-                        let _ = std::io::stdout().flush();
-                    }
-                    '\u{4}' => {
-                        // EOT(Ctrl-D)
-                        eprintln!("EOT(Ctrl-D)");
-                        println!("");
-                        break;
-                    }
-                    '\u{8}' | '\u{7f}' => {
-                        // BS | DEL
-                        eprintln!("BS | DEL");
-                        if let Some(_) = chars.pop() {
-                            print!("\u{8} \u{8}");
-                            let _ = std::io::stdout().flush();
-                        }
-                    }
-                    '\n' => {
-                        // LF
-                        eprintln!("LF");
-                        println!("");
-                        println!("INPUT: {}", String::from_iter(&chars));
-                        chars.clear();
-                        prompt();
-                    }
-                    _ => {
-                        print!("{}", c);
-                        let _ = std::io::stdout().flush();
-                        chars.push(c);
-                    }
+                if let Err(_) = ctx.push(c) {
+                    break;
                 }
             }
             Err(_) => break,
