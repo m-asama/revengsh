@@ -1,6 +1,8 @@
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 
+use nix::sys::signal;
+
 nix::ioctl_read_bad! {
     ioctl_gwinsz,
     libc::TIOCGWINSZ,
@@ -134,23 +136,46 @@ impl Context {
     }
 }
 
+static CTX: std::sync::Mutex<Option<Context>> = std::sync::Mutex::new(None);
+
+extern "C" fn winch_handler(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    if let Some(ref mut ctx) = *CTX.lock().unwrap() {
+        if let Ok((_, col)) = gwinsz() {
+            ctx.col = col;
+        }
+    }
+}
+
 fn main() {
     let termios_orig = match term_setup() {
         Ok(termios_orig) => termios_orig,
         Err(_) => return,
     };
-    let mut ctx = Context::new();
-    ctx.prompt();
+    *CTX.lock().unwrap() = Some(Context::new());
+    unsafe {
+        let winch_action = signal::SigAction::new(
+            signal::SigHandler::SigAction(winch_handler),
+            signal::SaFlags::empty(),
+            signal::SigSet::empty(),
+        );
+        let _ = signal::sigaction(signal::SIGWINCH, &winch_action);
+    }
+    if let Some(ref mut ctx) = *CTX.lock().unwrap() {
+        ctx.prompt();
+    }
     let mut buf = [0u8; 1];
     loop {
         match std::io::stdin().read(&mut buf) {
             Ok(_) => {
                 let c = char::from(buf[0]);
                 eprintln!("read: {:?}", c);
-                if let Err(_) = ctx.push(c) {
-                    break;
+                if let Some(ref mut ctx) = *CTX.lock().unwrap() {
+                    if let Err(_) = ctx.push(c) {
+                        break;
+                    }
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
